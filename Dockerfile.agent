@@ -1,0 +1,40 @@
+# Dockerfile.agent — the per-job orchestrator/agent image.
+#
+# This is what JobContainerRunner runs, one container per job (default image tag
+# `harmonizer-agent:latest`, see src/harmonizer/job_container/runner.py). It
+# builds ON TOP of the executor image so `runoak` + the prefetched ENVO /
+# NCBITaxon sqlite are already present and offline-ready, then installs
+# harmonizer itself plus the Claude Agent SDK (a project dependency) and the
+# `harmonizer_tools` MCP server. The container command is
+# `python -m harmonizer.orchestrator <job_dir>` (set by the runner), which runs
+# the mapping loop against the mounted job directory.
+#
+# Build:  docker build -f Dockerfile.base     -t harmonizer-base:latest     .
+#         docker build -f Dockerfile.executor -t harmonizer-executor:latest .
+#         docker build -f Dockerfile.agent    -t harmonizer-agent:latest    .
+FROM harmonizer-executor:latest AS agent
+
+# --- dependency layer (cached unless the lockfile/manifest change) -----------
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+# --- project layer -----------------------------------------------------------
+# claude-agent-sdk + mcp are declared in pyproject.toml, so `uv sync` installs
+# the Claude Agent SDK and wires the harmonizer_tools MCP server (launched by
+# the agent as a stdio subprocess). Ship the skills so the agent materializes
+# them into <job_dir>/.claude/skills at runtime.
+COPY src ./src
+COPY skills ./skills
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# The job dir is bind-mounted here by JobContainerRunner (CONTAINER_JOB_DIR);
+# HARMONIZER_JOB_ID / HARMONIZER_JOB_DIR / HARMONIZER_DATABASE_URL /
+# ANTHROPIC_API_KEY / HARMONIZER_JOBS_ROOT are passed as `-e` at run time.
+ENV HARMONIZER_JOBS_ROOT=/ \
+    PATH="/app/.venv/bin:${PATH}"
+
+# The concrete command (python -m harmonizer.orchestrator /job) is supplied by
+# JobContainerRunner.build_spec; this default mirrors it for manual `docker run`.
+CMD ["python", "-m", "harmonizer.orchestrator", "/job"]

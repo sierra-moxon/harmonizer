@@ -1,0 +1,63 @@
+# Dockerfile.executor — the code-execution / ontology-resolution layer.
+#
+# Ships pandas + oaklib/`runoak` and PREFETCHES the ENVO sqlite (always) and the
+# NCBITaxon sqlite (gated by the REQUIRE_NCBITAXON build ARG; see below) so
+# `runoak -i sqlite:obo:envo ...` works OFFLINE inside the job container. The
+# `execute_code` MCP tool runs Python in-process and expects `runoak` on PATH
+# (see src/harmonizer_tools/execute_code.py), so the agent image builds ON TOP
+# of this one to inherit both the tool and the warmed ontology cache.
+#
+# How the ontology sqlite is fetched & cached
+# -------------------------------------------
+# oaklib/semsql resolve `sqlite:obo:<ont>` by downloading a prebuilt SQLite build
+# of the ontology from the semantic-sql S3 bucket and caching it under the
+# pystow data home (default ~/.data/oaklib, overridable via OAKLIB_CACHEDIR /
+# pystow's PYSTOW_HOME). We set an explicit, image-local cache dir and warm it at
+# build time by running one `runoak info` per ontology; the download is baked
+# into the image layer so runtime needs no network.
+#
+# !! OPEN RISK #3 (plan): prefetching ENVO + NCBITaxon inflates this image
+# !! substantially — NCBITaxon's SQLite is multi-GB. If image size becomes a
+# !! problem, move the cache to a shared named volume (mounted at
+# !! ${OAKLIB_CACHEDIR}) warmed once, instead of baking it into the layer.
+#
+# Build:  docker build -f Dockerfile.base     -t harmonizer-base:latest     .
+#         docker build -f Dockerfile.executor -t harmonizer-executor:latest .
+FROM harmonizer-base:latest AS executor
+
+# Cache location for the downloaded ontology SQLite files. Kept explicit so the
+# same path can be swapped for a shared volume mount if size becomes an issue.
+ENV OAKLIB_CACHEDIR=/opt/ontologies \
+    PYSTOW_HOME=/opt/ontologies/pystow \
+    PATH="/app/.venv/bin:${PATH}"
+RUN mkdir -p "${OAKLIB_CACHEDIR}"
+
+# --- install the ontology toolchain (oaklib brings `runoak`) -----------------
+# Install just oaklib here (pandas is pulled in transitively / by the project);
+# uv pip install into the system so `runoak` is on PATH for `execute_code`.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system oaklib pandas
+
+# --- warm the ontology cache (this is the offline prefetch) ------------------
+# One lookup per ontology forces semsql to download + cache the prebuilt SQLite.
+# ENVO powers the environmental-triad resolution; NCBITaxon powers taxon
+# resolution (see skills/workflow/nmdc-env-triad.md, nmdc-taxon-resolution.md).
+RUN runoak -i sqlite:obo:envo info ENVO:00001998
+
+# NCBITaxon prefetch is gated by REQUIRE_NCBITAXON because its SQLite is multi-GB.
+#   - REQUIRE_NCBITAXON=0 (default): best-effort. The download may fail without
+#     failing the build; taxon resolution then is NOT guaranteed offline.
+#   - REQUIRE_NCBITAXON=1: enforce a verified offline cache. The build FAILS if
+#     the download fails, so a green build guarantees offline taxon resolution
+#     (at the cost of a large image layer). Build with:
+#       docker build -f Dockerfile.executor --build-arg REQUIRE_NCBITAXON=1 ...
+ARG REQUIRE_NCBITAXON=0
+RUN if [ "${REQUIRE_NCBITAXON}" = "1" ]; then \
+        runoak -i sqlite:obo:ncbitaxon info NCBITaxon:9606 && \
+        runoak -i sqlite:obo:ncbitaxon info NCBITaxon:9606 > /dev/null; \
+    else \
+        runoak -i sqlite:obo:ncbitaxon info NCBITaxon:9606 || true; \
+    fi
+
+# Sanity: ENVO must resolve offline. Fail the build early if the cache is cold.
+RUN runoak -i sqlite:obo:envo info ENVO:00001998 > /dev/null

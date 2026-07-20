@@ -1,0 +1,29 @@
+# Dockerfile.base — shared base layer for all harmonizer images.
+#
+# Python 3.12 slim + uv (the project's package manager) + git and minimal build
+# deps. Downstream images (Dockerfile, Dockerfile.agent, Dockerfile.executor)
+# FROM this so the toolchain layer is built once and cached.
+#
+# Build:  docker build -f Dockerfile.base -t harmonizer-base:latest .
+FROM python:3.12-slim AS base
+
+# Install uv from the official static image (fast, no pip bootstrap needed).
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# git is needed by some source deps / the Claude Agent SDK tooling; build-essential
+# covers any packages without wheels. Keep the layer lean and clean apt caches.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        build-essential \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv settings shared by all children: install into the system env (no venv layer
+# to mount), compile bytecode, and copy (not hardlink) from the cache.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
