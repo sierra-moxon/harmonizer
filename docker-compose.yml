@@ -1,75 +1,93 @@
-# docker-compose.yml — run the harmonizer web app (Phase 9).
+# docker-compose.yml — run the harmonizer web app with Postgres (Phase 9).
 #
-#   docker compose build   # build the web image (see `just docker-build` for the
-#                          # full base/executor/agent hierarchy)
-#   docker compose up      # serve the UI at http://localhost:8080
+#   docker compose build                       # build the web image
+#   docker compose --profile build-only build  # also build the agent image
+#   docker compose up                          # serve the UI at http://localhost:8080
+#
+# Follows the OpenScientist deployment convention: Postgres is a first-class
+# service (not a SQLite file), the `web` service waits for it to be healthy, and
+# per-job containers run in SIBLING containers on the same compose network so
+# they can reach `postgres` by hostname.
 #
 # The `web` service owns the JobManager. With HARMONIZER_USE_CONTAINER_ISOLATION=1
-# each job runs in a SIBLING container (image `harmonizer-agent:latest`) launched
-# by JobContainerRunner through the mounted Docker socket (docker-out-of-docker).
-# The agent image must be built separately first (`just docker-build`), since
-# compose only builds `web` here.
+# (the default here) each job runs in a sibling container (image
+# `harmonizer-agent:latest`) launched by JobContainerRunner through the mounted
+# Docker socket (docker-out-of-docker). Build that image first with the
+# `build-only` profile (or `just docker-build`); `docker compose up` does not
+# build it.
 
 services:
+  postgres:
+    image: postgres:18
+    restart: ${HARMONIZER_RESTART_POLICY:-unless-stopped}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-harmonizer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harmonizer_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-harmonizer}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-harmonizer} -d ${POSTGRES_DB:-harmonizer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   web:
     build:
       context: .
       dockerfile: Dockerfile
     image: harmonizer-web:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:8080"
     environment:
       # Provider credential for real agent runs (pass through from the host).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Toggle per-job container isolation. Off by default (in-process loop);
-      # set to 1 to launch sibling job containers via the socket below.
-      HARMONIZER_USE_CONTAINER_ISOLATION: ${HARMONIZER_USE_CONTAINER_ISOLATION:-0}
-      # Jobs + the DB live on the shared ./data volume so the container-loop
-      # writes and the web-host reads see the SAME files. Absolute paths: the
-      # SQLite default is relative to CWD, which diverges across containers.
-      HARMONIZER_JOBS_ROOT: /data/jobs
-      HARMONIZER_DATABASE_URL: sqlite:////data/harmonizer.db
+      # Per-job container isolation. On by default (sibling job containers via
+      # the socket below); set to 0 to run the loop in-process instead.
+      HARMONIZER_USE_CONTAINER_ISOLATION: ${HARMONIZER_USE_CONTAINER_ISOLATION:-1}
+      # Job dirs live under the app tree, bind-mounted from ./jobs (below).
+      HARMONIZER_JOBS_ROOT: /app/jobs
+      # Networked store shared by the web process and every sibling job
+      # container. Uses psycopg (sync driver) to match the app's sync engine.
+      HARMONIZER_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-harmonizer}:${POSTGRES_PASSWORD:-harmonizer_dev_password}@postgres:5432/${POSTGRES_DB:-harmonizer}
       # Image the per-job containers run (must match the tag built by
-      # `just docker-build`).
-      HARMONIZER_JOB_IMAGE: harmonizer-agent:latest
+      # `just docker-build` / the build-only profile).
+      HARMONIZER_JOB_IMAGE: ${HARMONIZER_JOB_IMAGE:-harmonizer-agent:latest}
+      # Host path of this project dir on the DOCKER HOST. Sibling job containers
+      # are launched on the host daemon, so their bind-mount sources must be
+      # host paths; the runner translates /app/... → ${PWD}/... using this.
+      HARMONIZER_HOST_PROJECT_DIR: ${HARMONIZER_HOST_PROJECT_DIR:-${PWD}}
+      HARMONIZER_CONTAINER_APP_DIR: /app
     volumes:
-      # Job directories + SQLite DB, shared with any sibling job containers.
-      - ./data:/data
-      # Legacy/local jobs dir mount kept for parity with local `just web` runs.
-      - ./jobs:/data/jobs
+      # Job directories, shared with the sibling job containers (host ./jobs ↔
+      # container /app/jobs; the runner maps back to the host path for siblings).
+      - ./jobs:/app/jobs
       # docker-out-of-docker: lets the JobManager launch sibling per-job
       # containers on the host daemon. Mounting the socket grants host-level
       # Docker control — only do this in a trusted single-user deployment.
       - /var/run/docker.sock:/var/run/docker.sock
+    # The web container needs permission to talk to the Docker socket; set
+    # DOCKER_GID to the host docker group's gid (e.g. `stat -c '%g' /var/run/docker.sock`).
+    group_add:
+      - "${DOCKER_GID:-999}"
 
-    # !! SQLite-across-containers caveat (plan open risk #5) !!
-    # ---------------------------------------------------------------------
-    # The default store is a single SQLite file on the ./data bind mount. The
-    # host web process (pages: list_jobs/get_job) and each sibling job container
-    # (the loop + MCP ledger tools) then read/write the SAME file concurrently.
-    # SQLite file locking over a bind mount is FRAGILE (WAL/lock caveats across
-    # the mount boundary), so this is only safe for light, low-concurrency,
-    # single-user local use. For concurrent jobs, escalate to Postgres: uncomment
-    # the `db` service below and point HARMONIZER_DATABASE_URL at it. All
-    # persistence already routes through get_database_url()/session_factory, so
-    # ONLY the URL changes — no code edits.
-    # depends_on:
-    #   - db
+  # harmonizer-agent: build-only image spawned at runtime by JobContainerRunner.
+  # Excluded from `docker compose up`; build it with:
+  #   docker compose --profile build-only build harmonizer-agent
+  # (it builds on Dockerfile.executor, so runoak + prefetched ontologies ship).
+  harmonizer-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: harmonizer-agent:latest
+    profiles: ["build-only"]
+    entrypoint: ["echo", "harmonizer-agent image built"]
 
-  # --- OPTIONAL Postgres (commented; SQLite is the default) ------------------
-  # Uncomment this service AND set, on `web`:
-  #   HARMONIZER_DATABASE_URL: postgresql+psycopg://harmonizer:harmonizer@db:5432/harmonizer
-  # (and add `psycopg` to the project deps). Prefer this when multiple job
-  # containers may run concurrently — it sidesteps the SQLite bind-mount locking
-  # fragility noted above.
-  # db:
-  #   image: postgres:16
-  #   environment:
-  #     POSTGRES_USER: harmonizer
-  #     POSTGRES_PASSWORD: harmonizer
-  #     POSTGRES_DB: harmonizer
-  #   volumes:
-  #     - pgdata:/var/lib/postgresql/data
-
-# volumes:
-#   pgdata:
+volumes:
+  postgres_data:

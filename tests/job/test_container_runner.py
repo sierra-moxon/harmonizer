@@ -179,7 +179,14 @@ def test_env_rendered_as_e_flags(settings, tmp_path):
 
 
 def test_launch_delegates_to_run_with_built_spec(settings, tmp_path, monkeypatch):
-    runner = JobContainerRunner(settings)
+    # A networked (non-SQLite) store is required for isolation; the SQLite
+    # guardrail is covered separately below. An explicit network short-circuits
+    # auto-detection so the test never shells out to `docker`.
+    monkeypatch.setenv(
+        "HARMONIZER_DATABASE_URL",
+        "postgresql+psycopg://harmonizer:harmonizer@db:5432/harmonizer",
+    )
+    runner = JobContainerRunner(settings, network="test-net")
     captured = {}
 
     def fake_run(spec):
@@ -193,6 +200,55 @@ def test_launch_delegates_to_run_with_built_spec(settings, tmp_path, monkeypatch
     assert captured["spec"].job_id == "job-1"
     assert captured["spec"].image == DEFAULT_JOB_IMAGE
     assert captured["spec"].host_job_dir == str(tmp_path.resolve())
+    assert captured["spec"].network == "test-net"
+
+
+def test_launch_resolves_network_when_unset(settings, tmp_path, monkeypatch):
+    """With no explicit network, launch() resolves one and puts it on the spec."""
+    import harmonizer.job_container.runner as runner_mod
+
+    monkeypatch.setenv(
+        "HARMONIZER_DATABASE_URL",
+        "postgresql+psycopg://harmonizer:harmonizer@db:5432/harmonizer",
+    )
+    monkeypatch.setattr(
+        runner_mod, "resolve_docker_network", lambda *a, **k: "harmonizer-net"
+    )
+    runner = JobContainerRunner(settings)
+    captured = {}
+    monkeypatch.setattr(
+        runner, "_run", lambda spec: captured.setdefault("spec", spec)
+    )
+    runner.launch("job-1", tmp_path)
+    assert captured["spec"].network == "harmonizer-net"
+
+
+def test_build_spec_translates_host_path(tmp_path, monkeypatch):
+    """When host_project_dir is set, the bind-mount source is the host path."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    s = Settings(
+        host_project_dir="/host/project",
+        container_app_dir="/app",
+    )
+    spec = JobContainerRunner(s).build_spec("j", "/app/jobs/j")
+    assert spec.host_job_dir == "/host/project/jobs/j"
+
+
+def test_launch_rejects_sqlite_store(settings, tmp_path, monkeypatch):
+    """Isolation + a SQLite URL must fail fast (writes would never reach host)."""
+    monkeypatch.setenv("HARMONIZER_DATABASE_URL", "sqlite:////data/harmonizer.db")
+    runner = JobContainerRunner(settings)
+    monkeypatch.setattr(runner, "_run", lambda spec: "should-not-run")
+    with pytest.raises(RuntimeError, match="SQLite"):
+        runner.launch("job-1", tmp_path)
+
+
+def test_job_image_from_settings_used(tmp_path, monkeypatch):
+    """``HARMONIZER_JOB_IMAGE`` (via Settings.job_image) drives the image."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    s = Settings(job_image="harmonizer-agent:custom")
+    spec = JobContainerRunner(s).build_spec("j", tmp_path)
+    assert spec.image == "harmonizer-agent:custom"
 
 
 def test_run_invokes_subprocess_with_docker_args(settings, tmp_path, monkeypatch):

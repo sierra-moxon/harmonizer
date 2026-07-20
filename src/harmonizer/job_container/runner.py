@@ -21,12 +21,18 @@ NCBITaxon sqlite are available for offline ontology resolution.
 Mirrors OpenScientist's ``job_container/runner.py`` (pattern only; authored
 here), minus its structural-biology tooling.
 
-DB / SQLite caveat
-------------------
-A per-job container writing to the same SQLite file the host web process reads
-is workable but fragile (file locking over a bind mount). ``HARMONIZER_DATABASE_URL``
-is passed through so the container and host agree on the store; for concurrent
-jobs prefer Postgres. See the plan's open risk #5 and ``docker-compose.yml``.
+Shared store (Postgres)
+-----------------------
+The web process and every sibling job container must agree on a store that both
+can reach. A SQLite file cannot: the sibling only bind-mounts the job dir, so a
+SQLite URL would write to a container-local file that vanishes on ``--rm``.
+:meth:`JobContainerRunner._assert_shared_store_supported` fails fast on that
+combination. ``docker-compose.yml`` therefore runs Postgres as a first-class
+service and passes ``HARMONIZER_DATABASE_URL`` through; :meth:`launch` joins the
+sibling to the web container's compose network (see
+:func:`~harmonizer.job_container.utils.resolve_docker_network`) so it can reach
+``postgres`` by hostname, and :func:`~harmonizer.job_container.utils.to_host_path`
+translates the job-dir bind-mount source to a host path for the host daemon.
 """
 
 from __future__ import annotations
@@ -36,7 +42,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from harmonizer.database.session import get_database_url
+from harmonizer.job_container.utils import resolve_docker_network, to_host_path
 from harmonizer.settings import Settings, get_settings
+
+#: Sentinel so ``build_spec`` can distinguish "use the runner's default network"
+#: from an explicit ``None`` (no ``--network`` flag).
+_USE_DEFAULT_NETWORK = object()
 
 #: Default image the per-job container runs. Built by ``Dockerfile.agent`` (which
 #: builds on the executor image, so ``runoak`` + prefetched ontologies are
@@ -125,7 +136,10 @@ class JobContainerRunner:
         auto_remove: bool = True,
     ) -> None:
         self._settings = settings or get_settings()
-        self._image = image or DEFAULT_JOB_IMAGE
+        # Precedence: explicit ``image`` arg > ``settings.job_image`` (populated
+        # from ``HARMONIZER_JOB_IMAGE``, e.g. in docker-compose.yml) > the
+        # module default. This is what makes the compose override effective.
+        self._image = image or self._settings.job_image or DEFAULT_JOB_IMAGE
         self._network = network
         self._auto_remove = auto_remove
 
@@ -154,14 +168,25 @@ class JobContainerRunner:
         """Resolve the DB URL to hand the container (env override or default)."""
         return get_database_url()
 
-    def build_spec(self, job_id: str, job_dir: str | Path) -> ContainerSpec:
+    def build_spec(
+        self,
+        job_id: str,
+        job_dir: str | Path,
+        network: str | None | object = _USE_DEFAULT_NETWORK,
+    ) -> ContainerSpec:
         """Construct the :class:`ContainerSpec` for ``job_id`` (no side effects).
 
-        ``job_dir`` is the host path; it is bind-mounted read-write at
-        :data:`CONTAINER_JOB_DIR` and the container command runs the orchestrator
-        loop against the in-container path.
+        ``job_dir`` is the path *inside the web container*; its resolved form is
+        translated to the Docker-host path (via
+        :func:`~harmonizer.job_container.utils.to_host_path`) so the bind-mount
+        source the host daemon sees is correct under docker-out-of-docker. The
+        container command runs the orchestrator loop against the in-container
+        path. ``network`` defaults to the runner's configured network;
+        :meth:`launch` passes the auto-detected compose network here.
         """
-        host_job_dir = str(Path(job_dir).resolve())
+        resolved = Path(job_dir).resolve()
+        host_job_dir = str(to_host_path(resolved, self._settings))
+        net = self._network if network is _USE_DEFAULT_NETWORK else network
         labels = {
             LABEL_MANAGED: "true",
             LABEL_JOB_ID: job_id,
@@ -171,10 +196,10 @@ class JobContainerRunner:
             job_id=job_id,
             host_job_dir=host_job_dir,
             container_job_dir=CONTAINER_JOB_DIR,
-            env=self.build_env(job_id, Path(host_job_dir)),
+            env=self.build_env(job_id, resolved),
             labels=labels,
             command=["python", "-m", "harmonizer.orchestrator", CONTAINER_JOB_DIR],
-            network=self._network,
+            network=net,  # type: ignore[arg-type]
             auto_remove=self._auto_remove,
             name=f"harmonizer-job-{job_id}",
         )
@@ -190,8 +215,31 @@ class JobContainerRunner:
         :meth:`build_spec` does all the config work; this method only performs
         the ``docker run`` side effect via :meth:`_run`.
         """
-        spec = self.build_spec(job_id, job_dir)
+        self._assert_shared_store_supported()
+        network = resolve_docker_network(self._network or self._settings.agent_network)
+        spec = self.build_spec(job_id, job_dir, network=network)
         return self._run(spec)
+
+    def _assert_shared_store_supported(self) -> None:
+        """Reject the SQLite + isolation combination that silently loses writes.
+
+        With container isolation ON, the sibling job container only bind-mounts
+        the job dir — not the DB. A SQLite file URL would make the container
+        write to a container-local file that vanishes on ``--rm``, so the host
+        web process never sees the job's DB updates. Postgres (a networked
+        store) is the supported path; fail fast with an actionable message
+        rather than losing data silently. Only URLs are inspected here, so this
+        stays daemon-free and does not affect the pure config-building tests.
+        """
+        url = self._settings_database_url()
+        if url.startswith("sqlite"):
+            raise RuntimeError(
+                "Container isolation is ON but HARMONIZER_DATABASE_URL is a "
+                f"SQLite store ({url!r}). The per-job container only mounts the "
+                "job dir, so SQLite writes never reach the host DB. Point "
+                "HARMONIZER_DATABASE_URL at Postgres (see docker-compose.yml) "
+                "or disable HARMONIZER_USE_CONTAINER_ISOLATION."
+            )
 
     def _run(self, spec: ContainerSpec) -> subprocess.CompletedProcess:
         """Invoke ``docker run`` for ``spec`` (the sole daemon-touching call)."""

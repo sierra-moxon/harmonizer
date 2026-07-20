@@ -41,10 +41,29 @@ class Settings(BaseSettings):
     max_iterations: int = 10
     #: Feature flag for Docker per-job isolation (Phase 9); off for local dev.
     use_container_isolation: bool = False
+    #: Image the per-job container runs when isolation is on. Read from
+    #: ``HARMONIZER_JOB_IMAGE`` (set in docker-compose.yml) so operators can point
+    #: at a custom agent tag without code changes; ``JobContainerRunner`` uses it.
+    job_image: str = "harmonizer-agent:latest"
     #: Root directory under which per-job directories are created. Mirrors the
     #: ``HARMONIZER_JOBS_ROOT`` env var the pre-pass already honors so the web
     #: layer and the CLI agree on where jobs live.
     jobs_root: str = "jobs"
+    #: Host path of this project directory on the *Docker host*. Set in
+    #: docker-compose.yml (``${PWD}``). When container isolation is on, the web
+    #: process launches sibling job containers via the mounted socket, so bind
+    #: mounts must use *host* paths, not the web container's internal paths;
+    #: :func:`~harmonizer.job_container.utils.to_host_path` uses this to
+    #: translate ``container_app_dir``-rooted paths back to the host. ``None``
+    #: (bare ``docker run`` / local dev) means no translation.
+    host_project_dir: str | None = None
+    #: The container-internal app dir that ``host_project_dir`` maps to (the
+    #: image ``WORKDIR``). Job dirs live under ``<container_app_dir>/jobs``.
+    container_app_dir: str = "/app"
+    #: Explicit Docker network for sibling job containers. ``None`` auto-detects
+    #: the web container's own (compose) network so siblings can reach the
+    #: ``postgres`` service by hostname.
+    agent_network: str | None = None
 
 
 @lru_cache

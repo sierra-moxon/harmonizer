@@ -14,6 +14,7 @@ dependencies = [
     "oaklib>=0.6",
     "openpyxl>=3.1",
     "pandas>=2.0",
+    "psycopg[binary]>=3.1",
     "pydantic-settings>=2.0",
     "sqlalchemy>=2.0",
 ]
@@ -27,6 +28,10 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# harmonizer_tools ships alongside harmonizer as a second top-level package.
+# The explicit list is required because harmonizer is installed via a real wheel
+# (`uv sync`, non-editable); hatchling's default discovery would only include the
+# package matching the project name and silently drop harmonizer_tools.
 [tool.hatch.build.targets.wheel]
 packages = ["src/harmonizer", "src/harmonizer_tools"]
 

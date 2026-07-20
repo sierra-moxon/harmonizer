@@ -40,6 +40,30 @@ _SOIL_ROWS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _temp_default_database(tmp_path, monkeypatch):
+    """Point the *default* store at a temp DB so tests never touch the repo root.
+
+    Several web tests exercise the default ``JobManager()`` / app ``_startup``
+    path (e.g. the NiceGUI ``run_sim`` simulations), which resolve the DB via
+    :func:`harmonizer.database.session.get_database_url`. Without this, that
+    defaults to ``sqlite:///harmonizer.db`` relative to CWD and leaves a stray
+    ``harmonizer.db`` in the repo root on every run. Redirect it to ``tmp_path``
+    and clear the ``@cache``d engine/session factory around the test so the
+    override takes effect and does not leak between tests.
+    """
+    from harmonizer.database import session as db_session
+
+    monkeypatch.setenv(
+        "HARMONIZER_DATABASE_URL", f"sqlite:///{tmp_path / 'web-default.db'}"
+    )
+    db_session.get_engine.cache_clear()
+    db_session.get_session_factory.cache_clear()
+    yield
+    db_session.get_engine.cache_clear()
+    db_session.get_session_factory.cache_clear()
+
+
 @pytest.fixture
 def sample_tsv(tmp_path) -> Path:
     """A small soil-like TSV that biases the interface guess to Soil."""

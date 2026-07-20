@@ -23,9 +23,11 @@ COPY skills ./skills
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Jobs and the SQLite DB live on mounted volumes (see docker-compose.yml).
-ENV HARMONIZER_JOBS_ROOT=/data/jobs \
-    HARMONIZER_DATABASE_URL=sqlite:////data/harmonizer.db \
+# Job dirs live under the app tree (./jobs is bind-mounted at /app/jobs by
+# docker-compose.yml). The database is Postgres in compose
+# (HARMONIZER_DATABASE_URL is set there); a bare `docker run` falls back to the
+# code default (local SQLite) via harmonizer.database.session.
+ENV HARMONIZER_JOBS_ROOT=/app/jobs \
     PATH="/app/.venv/bin:${PATH}"
 
 EXPOSE 8080
