@@ -26,10 +26,9 @@ what columns mean, what values are legal, and which controlled vocabularies
 (ontologies) to use.
 
 Manually reconciling a messy spreadsheet against that schema is tedious expert
-work. Harmonizer automates it using an AI agent, and — crucially — it never
-guesses silently. Every column it cannot confidently map becomes a
+work. Harmonizer automates it using an AI agent. Every column it cannot confidently map becomes a
 **placeholder** that either gets **resolved with evidence** or **explicitly
-refused**. You get an audit trail.
+refused**.
 
 In short: *spreadsheet in → (1) validated schema-conformant file + (2) a
 "curation report" explaining every decision, out.*
