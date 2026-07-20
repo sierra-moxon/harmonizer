@@ -43,6 +43,7 @@ from pathlib import Path
 
 from harmonizer.database.session import get_database_url
 from harmonizer.job_container.utils import resolve_docker_network, to_host_path
+from harmonizer.providers import get_provider
 from harmonizer.settings import Settings, get_settings
 
 #: Sentinel so ``build_spec`` can distinguish "use the runner's default network"

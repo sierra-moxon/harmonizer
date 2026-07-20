@@ -37,6 +37,20 @@ class Settings(BaseSettings):
             "ANTHROPIC_API_KEY", "HARMONIZER_ANTHROPIC_API_KEY"
         ),
     )
+    #: CBORG (LBNL gateway) key; read from ``CBORG_API_KEY`` first. Used only when
+    #: ``provider == "cborg"``.
+    cborg_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CBORG_API_KEY", "HARMONIZER_CBORG_API_KEY"),
+    )
+    #: CBORG API base URL. Defaults to the public endpoint; LBL-network users can
+    #: point at ``https://api-local.cborg.lbl.gov`` to bypass Cloudflare.
+    cborg_base_url: str = Field(
+        default="https://api.cborg.lbl.gov",
+        validation_alias=AliasChoices(
+            "CBORG_BASE_URL", "HARMONIZER_CBORG_BASE_URL"
+        ),
+    )
     #: Default iteration budget for the orchestrator loop (Phase 6).
     max_iterations: int = 10
     #: Feature flag for Docker per-job isolation (Phase 9); off for local dev.

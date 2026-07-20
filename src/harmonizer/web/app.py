@@ -132,15 +132,16 @@ def new_job_page() -> None:
         .classes("w-40")
     )
 
-    def _on_upload(event) -> None:
+    async def _on_upload(event) -> None:
         # Stream the upload to a temp file; created here, consumed on submit.
-        suffix = Path(event.name).suffix or ".tsv"
+        upload = event.file
+        suffix = Path(upload.name).suffix or ".tsv"
         fd, tmp = tempfile.mkstemp(prefix="harmonizer-upload-", suffix=suffix)
         with open(fd, "wb") as handle:
-            handle.write(event.content.read())
+            handle.write(await upload.read())
         pending["path"] = tmp
-        pending["name"] = event.name
-        ui.notify(f"Uploaded {event.name}")
+        pending["name"] = upload.name
+        ui.notify(f"Uploaded {upload.name}")
 
     ui.upload(on_upload=_on_upload, auto_upload=True).props(
         'accept=".tsv,.csv,.xlsx,.xls,.tab"'
