@@ -135,10 +135,15 @@ disposes.
   reused; the Python wrappers are original.
 
 ### State that ties it together
-- **A SQLite database** (`database/models.py`): two tables — `Job` (one row per
-  upload) and `PlaceholderRow` (one row per uncertain column). Statuses like
+- **A relational database** (`database/models.py`, SQLAlchemy): two models —
+  `Job` (one row per upload, table `jobs`) and `PlaceholderRow` (one row per
+  uncertain column, table `placeholder_rows`). Statuses like
   `PENDING/RUNNING/COMPLETED` and outcomes like
-  `RESOLVED/LEFT_PLACEHOLDER/VALIDATOR_REJECTED` live here.
+  `RESOLVED/LEFT_PLACEHOLDER/VALIDATOR_REJECTED` live here. The engine is chosen
+  by `HARMONIZER_DATABASE_URL` (`database/session.py`): it defaults to a local
+  **SQLite** file (`sqlite:///harmonizer.db`) for `just web`, and the Docker
+  Compose stack points it at a first-class **Postgres** service instead (hence
+  `psycopg` in the dependencies). Same schema either way; no ORM changes needed.
 - **JSON "sidecar" files** in each job directory (`draft_mapping.json`,
   `curation_inputs.json`, `curation_report.json`). The database and these files
   are kept in sync. The loop has a "freshness guard" that checks the curation
@@ -153,8 +158,11 @@ disposes.
 ### Docker (optional isolation — ignore this at first)
 - A hierarchy of Dockerfiles (`base → web`, and `base → executor → agent`) lets
   each mapping job run inside its own throwaway container with prefetched offline
-  ontologies. Off by default (`use_container_isolation=False`). **For local
-  learning, skip Docker entirely.**
+  ontologies. The `Settings` default is off (`use_container_isolation=False`), so
+  local `just web` runs the loop in-process. The **Docker Compose** stack instead
+  turns isolation **on** (`HARMONIZER_USE_CONTAINER_ISOLATION=1`) and adds a
+  first-class **Postgres** service the web process and every sibling job container
+  share. **For local learning, skip Docker entirely.**
 
 ---
 
@@ -173,7 +181,8 @@ harmonizer/
 │   │   ├── agent/           # Claude Agent SDK wrapper + skills loader
 │   │   ├── schema/          # linkml wrappers over NMDC schema
 │   │   ├── state/           # MappingState (placeholder tracking)
-│   │   ├── database/        # SQLAlchemy models + session
+│   │   ├── providers/       # anthropic/cborg backend dispatch (factory.py)
+│   │   ├── database/        # SQLAlchemy models + session (SQLite or Postgres)
 │   │   ├── job_container/   # optional Docker-per-job runner
 │   │   └── settings.py      # config from env vars (HARMONIZER_* prefix)
 │   └── harmonizer_tools/    # the MCP tools server (separate process)
@@ -248,9 +257,16 @@ Under the hood the CBORG provider points the Claude Code CLI at
 export ANTHROPIC_API_KEY=sk-...                      # enables the agent
 export HARMONIZER_MAX_ITERATIONS=10                  # agent loop cap
 export HARMONIZER_JOBS_ROOT=jobs                     # where job dirs go
-export HARMONIZER_DATABASE_URL=sqlite:///harmonizer.db
+export HARMONIZER_DATABASE_URL=sqlite:///harmonizer.db  # or postgresql+psycopg://…
 export HARMONIZER_USE_CONTAINER_ISOLATION=0          # keep Docker off
 ```
+
+`HARMONIZER_DATABASE_URL` accepts any SQLAlchemy URL: the SQLite file above for
+local dev, or `postgresql+psycopg://user:pass@host:5432/db` to use Postgres (what
+the Docker Compose stack sets automatically). Container-isolation deployments also
+honor `HARMONIZER_JOB_IMAGE`, `HARMONIZER_HOST_PROJECT_DIR`,
+`HARMONIZER_CONTAINER_APP_DIR`, and `HARMONIZER_AGENT_NETWORK` (see
+`docker-compose.yml`).
 
 ### Poke at the parts individually
 
@@ -267,8 +283,14 @@ just tools                       # start the MCP tools server by hand (smoke tes
 
 ```sh
 just docker-build    # build base -> web, base -> executor -> agent
-just docker-up       # start the web app; UI at http://localhost:8080
+just docker-up       # start Postgres + the web app; UI at http://localhost:8080
 ```
+
+The Compose stack (`docker-compose.yml`) runs **Postgres 18** as a first-class
+service and points `HARMONIZER_DATABASE_URL` at it
+(`postgresql+psycopg://…@postgres:5432/…`), rather than the local SQLite file.
+It also enables per-job container isolation by default, launching sibling job
+containers via the mounted Docker socket.
 
 ---
 
