@@ -150,9 +150,9 @@ class JobContainerRunner:
         """Return the environment passed into the container.
 
         Includes the job binding (``HARMONIZER_JOB_ID``/``_JOB_DIR``), the jobs
-        root, the database URL, and the provider credential when available. The
-        job dir is expressed as the *in-container* path so the tools/agent
-        resolve the mounted files.
+        root, the database URL, and the selected provider's credential env vars
+        when configured. The job dir is expressed as the *in-container* path so
+        the tools/agent resolve the mounted files.
         """
         env: dict[str, str] = {
             JOB_ID_ENV: job_id,
@@ -160,9 +160,9 @@ class JobContainerRunner:
             JOBS_ROOT_ENV: str(Path(CONTAINER_JOB_DIR).parent),
             DATABASE_URL_ENV: self._settings_database_url(),
         }
-        api_key = self._settings.anthropic_api_key
-        if api_key:
-            env[ANTHROPIC_API_KEY_ENV] = api_key
+        provider = get_provider(self._settings)
+        if provider.is_configured():
+            env.update(provider.environment())
         return env
 
     def _settings_database_url(self) -> str:

@@ -221,6 +221,27 @@ export ANTHROPIC_API_KEY=sk-...
 just web
 ```
 
+### Choosing a provider
+
+The backend is selected with `HARMONIZER_PROVIDER` (default `anthropic`). Two
+providers ship today:
+
+```sh
+# Direct Anthropic (default) — uses the x-api-key scheme
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# CBORG (LBNL gateway) — uses Claude Code's bearer scheme under the hood
+export HARMONIZER_PROVIDER=cborg
+export CBORG_API_KEY=...            # request one at https://cborg.lbl.gov/api_request
+# optional overrides:
+export HARMONIZER_MODEL=claude-opus-4-8                            # CBORG default
+export HARMONIZER_CBORG_BASE_URL=https://api-local.cborg.lbl.gov   # LBL network only
+```
+
+Under the hood the CBORG provider points the Claude Code CLI at
+`ANTHROPIC_BASE_URL` with an `ANTHROPIC_AUTH_TOKEN` bearer token, rather than an
+`ANTHROPIC_API_KEY`. See [cborg.lbl.gov](https://cborg.lbl.gov/) for models.
+
 ### Useful config knobs (optional environment variables)
 
 ```sh
